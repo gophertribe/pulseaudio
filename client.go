@@ -31,6 +31,7 @@ import (
 	"os"
 	"os/user"
 	"path"
+	"strings"
 )
 
 const version = 32
@@ -56,46 +57,78 @@ func (err *Error) Error() string {
 	return fmt.Sprintf("PulseAudio error: %s -> %s", err.Cmd, errors[err.Code])
 }
 
+// ClientOpt defines a client modifier routine
+type ClientOpt func(*Client)
+
+// WithAddr sets address manually
+func WithAddr(proto, addr string) ClientOpt {
+	return func(client *Client) {
+		client.protocol = proto
+		client.addr = addr
+	}
+}
+
 // Client maintains a connection to the PulseAudio server.
 type Client struct {
 	conn        net.Conn
 	clientIndex int
 	packets     chan packet
 	updates     chan struct{}
+	protocol    string
+	addr        string
+	cookie      string
 }
 
 // NewClient establishes a connection to the PulseAudio server.
-func NewClient(addressArr ...string) (*Client, error) {
-	if len(addressArr) < 1 {
-		addressArr = []string{defaultAddr}
+func NewClient(opts ...ClientOpt) (*Client, error) {
+	c := &Client{
+		packets:  make(chan packet),
+		updates:  make(chan struct{}, 1),
+		protocol: "tcp",
+		addr:     os.Getenv("PULSE_SERVER"),
+		cookie:   os.Getenv("PULSE_COOKIE"),
 	}
-
-	conn, err := net.Dial("unix", addressArr[0])
+	for _, o := range opts {
+		o(c)
+	}
+	if c.addr == "" {
+		c.addr = defaultAddr
+	}
+	if strings.HasPrefix(c.addr, "unix://") {
+		c.addr = strings.TrimPrefix(c.addr, "unix://")
+		c.protocol = "unix"
+	}
+	if c.cookie == "" {
+		c.cookie = os.Getenv("HOME") + "/.config/pulse/cookie"
+	}
+	err := c.connect()
 	if err != nil {
 		return nil, err
 	}
+	return c, nil
+}
 
-	c := &Client{
-		conn:    conn,
-		packets: make(chan packet),
-		updates: make(chan struct{}, 1),
+func (c *Client) connect() error {
+	var err error
+	c.conn, err = net.Dial(c.protocol, c.addr)
+	if err != nil {
+		return fmt.Errorf("could not dial pulseaudio server %s: %w", c.addr, err)
 	}
 
 	go c.processPackets()
 
-	err = c.auth()
+	err = c.auth(c.cookie)
 	if err != nil {
-		c.Close()
-		return nil, err
+		_ = c.Close()
+		return fmt.Errorf("authentication failure: %w", err)
 	}
 
 	err = c.setName()
 	if err != nil {
-		c.Close()
-		return nil, err
+		_ = c.Close()
+		return fmt.Errorf("could not send app identification data to server: %w", err)
 	}
-
-	return c, nil
+	return nil
 }
 
 const frameSizeMaxAllow = 1024 * 1024 * 16
@@ -111,7 +144,7 @@ func (c *Client) processPackets() {
 			}
 			n := binary.BigEndian.Uint32(b.Bytes())
 			if n > frameSizeMaxAllow {
-				err = fmt.Errorf("Response size %d is too long (only %d allowed)", n, frameSizeMaxAllow)
+				err = fmt.Errorf("response size %d is too long (only %d allowed)", n, frameSizeMaxAllow)
 				break
 			}
 			b.Grow(int(n) + 20)
@@ -188,7 +221,7 @@ loop:
 			if !ok {
 				// Another case, similar to the one above.
 				// We could ignore it and continue but it may hide errors so let's panic.
-				panic(fmt.Sprintf("No pending requests for tag %d (%s)", tag, rsp))
+				panic(fmt.Sprintf("no pending requests for tag %d (%s)", tag, rsp))
 			}
 			delete(pending, tag)
 			if rsp == commandError {
@@ -236,7 +269,7 @@ func (c *Client) request(cmd command, args ...interface{}) (*bytes.Buffer, error
 		return nil, err
 	}
 	if b.Len() > frameSizeMaxAllow {
-		return nil, fmt.Errorf("Request size %d is too long (only %d allowed)", b.Len(), frameSizeMaxAllow)
+		return nil, fmt.Errorf("request size %d is too long (only %d allowed)", b.Len(), frameSizeMaxAllow)
 	}
 	responseChan := make(chan packetResponse)
 
@@ -262,9 +295,8 @@ func (c *Client) addPacket(data packet) (err error) {
 	return nil
 }
 
-func (c *Client) auth() error {
+func (c *Client) auth(cookiePath string) error {
 	const protocolVersionMask = 0x0000FFFF
-	cookiePath := os.Getenv("HOME") + "/.config/pulse/cookie"
 	cookie, err := ioutil.ReadFile(cookiePath)
 	if err != nil {
 		return err
@@ -320,7 +352,7 @@ func (c *Client) setName() error {
 }
 
 // Close closes the connection to PulseAudio server and makes the Client unusable.
-func (c *Client) Close() {
+func (c *Client) Close() error {
 	close(c.packets)
-	c.conn.Close()
+	return c.conn.Close()
 }

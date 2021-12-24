@@ -27,5 +27,5 @@ var errors = []string{
 	"Missing implementation",
 	"Client forked",
 	"Input/Output error",
-	"Device or resource busy",
+	"Sink or resource busy",
 }

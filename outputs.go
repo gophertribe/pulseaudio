@@ -43,7 +43,7 @@ func (o Output) Activate() error {
 	}
 
 	found = false
-	var port port
+	var port Port
 	for _, port = range card.Ports {
 		if port.Name == o.PortID {
 			found = true
@@ -51,7 +51,7 @@ func (o Output) Activate() error {
 		}
 	}
 	if !found {
-		return fmt.Errorf("PulseAudio error: port %s is no longer available", o.PortID)
+		return fmt.Errorf("PulseAudio error: Port %s is no longer available", o.PortID)
 	}
 
 	for _, otherCard := range cards {
@@ -73,7 +73,7 @@ func (o Output) Activate() error {
 	if err != nil {
 		return err
 	}
-	sinks, err := c.sinks()
+	sinks, err := c.Sinks()
 	if err != nil {
 		return err
 	}
@@ -101,7 +101,7 @@ func (c *Client) Outputs() (outputs []Output, activeIndex int, err error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	sinks, err := c.sinks()
+	sinks, err := c.Sinks()
 	if err != nil {
 		return nil, 0, err
 	}

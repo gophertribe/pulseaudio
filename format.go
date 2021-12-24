@@ -106,7 +106,7 @@ func bwrite(w io.Writer, data ...interface{}) error {
 			continue
 		}
 
-		if cvolume, ok := v.(cvolume); ok {
+		if cvolume, ok := v.(CVolume); ok {
 			arr := []uint32(cvolume)
 			err := bwrite(w, cvolumeTag, byte(len(arr)), arr)
 			if err != nil {
@@ -123,7 +123,8 @@ func bwrite(w io.Writer, data ...interface{}) error {
 }
 
 func bread(r io.Reader, data ...interface{}) error {
-	for _, v := range data {
+	nullString := false
+	for i, v := range data {
 		t, ok := v.(tagType)
 		if ok {
 			var tt tagType
@@ -131,13 +132,21 @@ func bread(r io.Reader, data ...interface{}) error {
 				return err
 			}
 			if tt != t {
-				return fmt.Errorf("Protcol error: Got type %s but expected %s", tt, t)
+				if t == stringTag && tt == stringNullTag {
+					nullString = true
+					continue
+				}
+				return fmt.Errorf("protcol error: (field %d) got type %s but expected %s", i, tt, t)
 			}
 			continue
 		}
 
 		sptr, ok := v.(*string)
 		if ok {
+			if nullString {
+				nullString = false
+				continue
+			}
 			buf := make([]byte, 1024) // max string length i guess.
 			i := 0
 			for {
@@ -150,7 +159,7 @@ func bread(r io.Reader, data ...interface{}) error {
 					break
 				} else {
 					if i > len(buf) {
-						return fmt.Errorf("String is too long (max %d bytes)", len(buf))
+						return fmt.Errorf("string is too long (max %d bytes)", len(buf))
 					}
 					i++
 				}
@@ -175,7 +184,7 @@ func bread(r io.Reader, data ...interface{}) error {
 					break
 				}
 				if t != stringTag {
-					return fmt.Errorf("Protcol error: Got type %s but expected %s", t, stringTag)
+					return fmt.Errorf("protcol error: got type %s but expected %s", t, stringTag)
 				}
 
 				var k, v string
@@ -189,7 +198,7 @@ func bread(r io.Reader, data ...interface{}) error {
 					return err
 				}
 				if len(v) != int(l1-1) || len(v) != int(l2-1) {
-					return fmt.Errorf("Protocol error: Proplist value length mismatch (len %d, arb len %d, value len %d)",
+					return fmt.Errorf("protocol error: proplist value length mismatch (len %d, arb len %d, value len %d)",
 						l1, l2, len(v))
 				}
 				(*propList)[k] = v
@@ -216,7 +225,7 @@ func bread(r io.Reader, data ...interface{}) error {
 			} else if tt == falseTag {
 				*bptr = false
 			} else {
-				return fmt.Errorf("Protcol error: Got type %s but expected boolean true or false", tt)
+				return fmt.Errorf("protcol error: got type %s but expected boolean true or false", tt)
 			}
 			continue
 		}

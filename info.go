@@ -9,11 +9,11 @@ type Server struct {
 	PackageVersion string
 	User           string
 	Hostname       string
-	SampleSpec     sampleSpec
+	SampleSpec     SampleSpec
 	DefaultSink    string
 	DefaultSource  string
 	Cookie         uint32
-	ChannelMap     channelMap
+	ChannelMap     ChannelMap
 }
 
 func (s *Server) ReadFrom(r io.Reader) (int64, error) {
@@ -29,14 +29,35 @@ func (s *Server) ReadFrom(r io.Reader) (int64, error) {
 		&s.ChannelMap)
 }
 
-type sink struct {
+type Module struct {
+	Index    uint32
+	Name     string
+	Argument string
+	NUsed    uint32
+	PropList map[string]string
+}
+
+func (m *Module) ReadFrom(r io.Reader) (int64, error) {
+	err := bread(r,
+		uint32Tag, &m.Index,
+		stringTag, &m.Name,
+		stringTag, &m.Argument,
+		uint32Tag, &m.NUsed)
+	if err != nil {
+		return 0, err
+	}
+	err = bread(r, &m.PropList)
+	return 0, nil
+}
+
+type Sink struct {
 	Index              uint32
 	Name               string
 	Description        string
-	SampleSpec         sampleSpec
-	ChannelMap         channelMap
+	SampleSpec         SampleSpec
+	ChannelMap         ChannelMap
 	ModuleIndex        uint32
-	Cvolume            cvolume
+	CVolume            CVolume
 	Muted              bool
 	MonitorSourceIndex uint32
 	MonitorSourceName  string
@@ -49,12 +70,12 @@ type sink struct {
 	SinkState          uint32
 	NVolumeSteps       uint32
 	CardIndex          uint32
-	Ports              []sinkPort
+	Ports              []SinkPort
 	ActivePortName     string
-	Formats            []formatInfo
+	Formats            []FormatInfo
 }
 
-func (s *sink) ReadFrom(r io.Reader) (int64, error) {
+func (s *Sink) ReadFrom(r io.Reader) (int64, error) {
 	var portCount uint32
 	err := bread(r,
 		uint32Tag, &s.Index,
@@ -63,7 +84,7 @@ func (s *sink) ReadFrom(r io.Reader) (int64, error) {
 		&s.SampleSpec,
 		&s.ChannelMap,
 		uint32Tag, &s.ModuleIndex,
-		&s.Cvolume,
+		&s.CVolume,
 		&s.Muted,
 		uint32Tag, &s.MonitorSourceIndex,
 		stringTag, &s.MonitorSourceName,
@@ -80,7 +101,7 @@ func (s *sink) ReadFrom(r io.Reader) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	s.Ports = make([]sinkPort, portCount)
+	s.Ports = make([]SinkPort, portCount)
 	for i := uint32(0); i < portCount; i++ {
 		err = bread(r, &s.Ports[i])
 		if err != nil {
@@ -105,7 +126,7 @@ func (s *sink) ReadFrom(r io.Reader) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	s.Formats = make([]formatInfo, formatCount)
+	s.Formats = make([]FormatInfo, formatCount)
 	for i := uint8(0); i < formatCount; i++ {
 		err = bread(r, &s.Formats[i])
 		if err != nil {
@@ -115,32 +136,32 @@ func (s *sink) ReadFrom(r io.Reader) (int64, error) {
 	return 0, nil
 }
 
-type formatInfo struct {
+type FormatInfo struct {
 	Encoding byte
 	PropList map[string]string
 }
 
-func (i *formatInfo) ReadFrom(r io.Reader) (int64, error) {
+func (i *FormatInfo) ReadFrom(r io.Reader) (int64, error) {
 	return 0, bread(r, formatInfoTag, uint8Tag, &i.Encoding, &i.PropList)
 }
 
-type sinkPort struct {
+type SinkPort struct {
 	Name, Description string
-	Pririty           uint32
+	Priority          uint32
 	Available         uint32
 }
 
-func (p *sinkPort) ReadFrom(r io.Reader) (int64, error) {
+func (p *SinkPort) ReadFrom(r io.Reader) (int64, error) {
 	return 0, bread(r,
 		stringTag, &p.Name,
 		stringTag, &p.Description,
-		uint32Tag, &p.Pririty,
+		uint32Tag, &p.Priority,
 		uint32Tag, &p.Available)
 }
 
-type cvolume []uint32
+type CVolume []uint32
 
-func (v *cvolume) ReadFrom(r io.Reader) (int64, error) {
+func (v *CVolume) ReadFrom(r io.Reader) (int64, error) {
 	var n byte
 	err := bread(r, cvolumeTag, &n)
 	if err != nil {
@@ -150,9 +171,9 @@ func (v *cvolume) ReadFrom(r io.Reader) (int64, error) {
 	return 0, bread(r, []uint32(*v))
 }
 
-type channelMap []byte
+type ChannelMap []byte
 
-func (m *channelMap) ReadFrom(r io.Reader) (int64, error) {
+func (m *ChannelMap) ReadFrom(r io.Reader) (int64, error) {
 	var n byte
 	err := bread(r, channelMapTag, &n)
 	if err != nil {
@@ -163,13 +184,13 @@ func (m *channelMap) ReadFrom(r io.Reader) (int64, error) {
 	return 0, err
 }
 
-type sampleSpec struct {
+type SampleSpec struct {
 	Format   byte
 	Channels byte
 	Rate     uint32
 }
 
-func (s *sampleSpec) ReadFrom(r io.Reader) (int64, error) {
+func (s *SampleSpec) ReadFrom(r io.Reader) (int64, error) {
 	return 0, bread(r, sampleSpecTag, &s.Format, &s.Channels, &s.Rate)
 }
 
@@ -178,31 +199,31 @@ type Card struct {
 	Name          string
 	Module        uint32
 	Driver        string
-	Profiles      map[string]*profile
-	ActiveProfile *profile
+	Profiles      map[string]*Profile
+	ActiveProfile *Profile
 	PropList      map[string]string
-	Ports         []port
+	Ports         []Port
 }
 
-type profile struct {
+type Profile struct {
 	Name, Description string
 	Nsinks, Nsources  uint32
 	Priority          uint32
 	Available         uint32
 }
 
-type port struct {
+type Port struct {
 	Card              *Card
 	Name, Description string
 	Pririty           uint32
 	Available         uint32
 	Direction         byte
 	PropList          map[string]string
-	Profiles          []*profile
+	Profiles          []*Profile
 	LatencyOffset     int64
 }
 
-func (p *port) ReadFrom(r io.Reader) (int64, error) {
+func (p *Port) ReadFrom(r io.Reader) (int64, error) {
 	err := bread(r,
 		stringTag, &p.Name,
 		stringTag, &p.Description,
@@ -229,14 +250,14 @@ func (p *port) ReadFrom(r io.Reader) (int64, error) {
 	return 0, bread(r, int64Tag, &p.LatencyOffset)
 }
 
-func (c *Client) sinks() ([]sink, error) {
+func (c *Client) Sinks() ([]Sink, error) {
 	b, err := c.request(commandGetSinkInfoList)
 	if err != nil {
 		return nil, err
 	}
-	var sinks []sink
+	var sinks []Sink
 	for b.Len() > 0 {
-		var sink sink
+		var sink Sink
 		err = bread(b, &sink)
 		if err != nil {
 			return nil, err
@@ -244,6 +265,23 @@ func (c *Client) sinks() ([]sink, error) {
 		sinks = append(sinks, sink)
 	}
 	return sinks, nil
+}
+
+func (c *Client) Modules() ([]Module, error) {
+	b, err := c.request(commandGetModuleInfoList)
+	if err != nil {
+		return nil, err
+	}
+	var modules []Module
+	for b.Len() > 0 {
+		var module Module
+		err = bread(b, &module)
+		if err != nil {
+			return nil, err
+		}
+		modules = append(modules, module)
+	}
+	return modules, nil
 }
 
 func (c *Client) Cards() ([]Card, error) {
@@ -264,9 +302,9 @@ func (c *Client) Cards() ([]Card, error) {
 		if err != nil {
 			return nil, err
 		}
-		card.Profiles = make(map[string]*profile)
+		card.Profiles = make(map[string]*Profile)
 		for i := uint32(0); i < profileCount; i++ {
-			var profile profile
+			var profile Profile
 			err = bread(b,
 				stringTag, &profile.Name,
 				stringTag, &profile.Description,
@@ -289,7 +327,7 @@ func (c *Client) Cards() ([]Card, error) {
 			return nil, err
 		}
 		card.ActiveProfile = card.Profiles[activeProfileName]
-		card.Ports = make([]port, portCount)
+		card.Ports = make([]Port, portCount)
 		for i := uint32(0); i < portCount; i++ {
 			card.Ports[i].Card = &card
 			err = bread(b, &card.Ports[i])
