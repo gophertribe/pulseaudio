@@ -1,6 +1,6 @@
 package pulseaudio
 
-var errors = []string{
+var errorCodes = []string{
 	"OK",
 	"Access denied",
 	"Unknown command",

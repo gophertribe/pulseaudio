@@ -23,7 +23,9 @@ package pulseaudio
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -32,21 +34,28 @@ import (
 	"os/user"
 	"path"
 	"strings"
+	"sync"
+	"time"
 )
 
 const version = 32
 
 var defaultAddr = fmt.Sprintf("/run/user/%d/pulse/native", os.Getuid())
 
-type packetResponse struct {
+type frame struct {
 	buff *bytes.Buffer
 	err  error
 }
 
-type packet struct {
-	requestBytes []byte
-	responseChan chan<- packetResponse
+type request struct {
+	data     []byte
+	response chan<- frame
 }
+
+var (
+	ErrClientClosed        = errors.New("pulseaudio client was closed")
+	ErrCouldNotSendRequest = errors.New("could not send packet")
+)
 
 type Error struct {
 	Cmd  string
@@ -54,7 +63,7 @@ type Error struct {
 }
 
 func (err *Error) Error() string {
-	return fmt.Sprintf("PulseAudio error: %s -> %s", err.Cmd, errors[err.Code])
+	return fmt.Sprintf("pulse audio error: %s -> %s", err.Cmd, errorCodes[err.Code])
 }
 
 // ClientOpt defines a client modifier routine
@@ -68,21 +77,38 @@ func WithAddr(proto, addr string) ClientOpt {
 	}
 }
 
+func WithDialTimeout(timeout time.Duration) ClientOpt {
+	return func(client *Client) {
+		client.dialer.Timeout = timeout
+	}
+}
+
+// WithLogger sets logger on the client
+func WithLogger(logger Logger) ClientOpt {
+	return func(client *Client) {
+		client.logger = logger
+	}
+}
+
 // Client maintains a connection to the PulseAudio server.
 type Client struct {
 	conn        net.Conn
+	err         error
 	clientIndex int
-	packets     chan packet
+	requests    chan request
 	updates     chan struct{}
 	protocol    string
 	addr        string
 	cookie      string
+	dialer      net.Dialer
+	logger      Logger
+	cancel      context.CancelFunc
 }
 
 // NewClient establishes a connection to the PulseAudio server.
 func NewClient(opts ...ClientOpt) (*Client, error) {
 	c := &Client{
-		packets:  make(chan packet),
+		requests: make(chan request, 16),
 		updates:  make(chan struct{}, 1),
 		protocol: "tcp",
 		addr:     os.Getenv("PULSE_SERVER"),
@@ -101,114 +127,186 @@ func NewClient(opts ...ClientOpt) (*Client, error) {
 	if c.cookie == "" {
 		c.cookie = os.Getenv("HOME") + "/.config/pulse/cookie"
 	}
-	err := c.connect()
-	if err != nil {
-		return nil, err
+	if c.logger == nil {
+		c.logger = discardLogger{}
 	}
 	return c, nil
 }
 
-func (c *Client) connect() error {
-	var err error
-	c.conn, err = net.Dial(c.protocol, c.addr)
-	if err != nil {
-		return fmt.Errorf("could not dial pulseaudio server %s: %w", c.addr, err)
-	}
+func (c *Client) Connect(ctx context.Context, interval time.Duration, wg *sync.WaitGroup) {
+	ctx, c.cancel = context.WithCancel(ctx)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
 
-	go c.processPackets()
+		c.logger.Info("starting pulseaudio connection loop")
+		// start connecting whenever we are ready
+		var timer *time.Timer
+		for {
+			err := c.connect(ctx, c.logger, wg)
+			if err != nil {
+				c.logger.Errorf("pulseaudio connection error: %v", err)
+			}
+			c.logger.Infof("reconnecting pulseaudio connection loop in %s", interval)
+			if timer == nil {
+				timer = time.NewTimer(interval)
+			} else {
+				timer.Reset(interval)
+			}
+			select {
+			case <-ctx.Done():
+				c.logger.Info("stopping pulseaudio connection loop")
+				return
+			case <-timer.C:
+				continue
+			}
+		}
+	}()
+}
 
-	err = c.auth(c.cookie)
+func (c *Client) init(ctx context.Context) error {
+	err := c.auth(ctx, c.cookie)
 	if err != nil {
-		_ = c.Close()
 		return fmt.Errorf("authentication failure: %w", err)
 	}
 
-	err = c.setName()
+	err = c.setName(ctx)
 	if err != nil {
-		_ = c.Close()
 		return fmt.Errorf("could not send app identification data to server: %w", err)
+	}
+	return nil
+}
+
+func (c *Client) connect(ctx context.Context, logger Logger, wg *sync.WaitGroup) error {
+	logger.Infof("dialing pulseaudio server %s://%s", c.protocol, c.addr)
+	var err error
+	c.conn, err = c.dialer.DialContext(ctx, c.protocol, c.addr)
+	if err != nil {
+		return fmt.Errorf("could not dial pulseaudio server %s: %w", c.addr, err)
+	}
+	defer func() { _ = c.conn.Close() }()
+
+	// buffer init requests for processing
+	initCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	err = c.init(initCtx)
+	cancel()
+	if err != nil {
+		return fmt.Errorf("error during init: %w", err)
+	}
+	// start receive loop
+	recv := c.receive(ctx, wg)
+
+	pending := make(map[uint32]request)
+	// cleanup pending
+	defer func() {
+		for _, p := range pending {
+			p.response <- frame{
+				buff: nil,
+				err:  ErrClientClosed,
+			}
+		}
+	}()
+	err = c.handleFrames(recv, c.requests, pending, logger)
+	if err != nil {
+		return fmt.Errorf("frame handler error: %w", err)
 	}
 	return nil
 }
 
 const frameSizeMaxAllow = 1024 * 1024 * 16
 
-func (c *Client) processPackets() {
-	recv := make(chan *bytes.Buffer)
-	go func(recv chan<- *bytes.Buffer) {
-		var err error
+func (c *Client) receive(ctx context.Context, wg *sync.WaitGroup) <-chan frame {
+	// the channel will be closed when the goroutine exits
+	recv := make(chan frame)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer close(recv)
 		for {
+			if ctx.Err() != nil {
+				// context cancelled
+				return
+			}
 			var b bytes.Buffer
-			if _, err = io.CopyN(&b, c.conn, 4); err != nil {
-				break
+			_, err := io.CopyN(&b, c.conn, 4)
+			if err != nil {
+				recv <- frame{
+					buff: &b,
+					err:  fmt.Errorf("could not read header from connection: %w", err),
+				}
+				return
 			}
 			n := binary.BigEndian.Uint32(b.Bytes())
 			if n > frameSizeMaxAllow {
-				err = fmt.Errorf("response size %d is too long (only %d allowed)", n, frameSizeMaxAllow)
-				break
+				recv <- frame{
+					buff: &b,
+					err:  fmt.Errorf("response size %d is too long (only %d allowed)", n, frameSizeMaxAllow),
+				}
+				_, _ = io.CopyN(io.Discard, c.conn, int64(n))
+				return
 			}
+			// the rest of the header
 			b.Grow(int(n) + 20)
 			if _, err = io.CopyN(&b, c.conn, int64(n)+16); err != nil {
-				break
+				recv <- frame{
+					buff: &b,
+					err:  fmt.Errorf("could not read data from connection: %w", err),
+				}
+				return
 			}
 			b.Next(20) // skip the header
-			recv <- &b
+			recv <- frame{
+				buff: &b,
+			}
 		}
-		close(recv)
-	}(recv)
+	}()
+	return recv
+}
 
-	pending := make(map[uint32]packet)
+func (c *Client) handleFrames(in <-chan frame, out <-chan request, pending map[uint32]request, logger Logger) error {
 	tag := uint32(0)
-	var err error
-loop:
 	for {
 		select {
-		case p, ok := <-c.packets: // Outgoing request
+		case p, ok := <-out: // Outgoing request
 			if !ok {
 				// Client was closed
-				break loop
+				logger.Info("outgoing frames channel closed; aborting frame handler routine")
+				return nil
 			}
-			// Find an unused tag
-			for {
-				_, exists := pending[tag]
-				if !exists {
-					break
-				}
-				tag++
-				if tag == 0xffffffff { // reserved for subscription events
-					tag = 0
-				}
-			}
-			if len(p.requestBytes) < 26 {
-				p.responseChan <- packetResponse{
-					buff: nil,
-					err:  fmt.Errorf("request too short. Needs at least 26 bytes"),
-				}
+			// check if request has valid format
+			if len(p.data) < 26 {
+				p.response <- frame{err: fmt.Errorf("request too short; minimum is 26 bytes")}
 				continue
 			}
-			binary.BigEndian.PutUint32(p.requestBytes, uint32(len(p.requestBytes))-20)
-			binary.BigEndian.PutUint32(p.requestBytes[26:], tag) // fix tag
-			_, err = c.conn.Write(p.requestBytes)
+
+			tag = nextAvailableTag(tag, pending)
+
+			binary.BigEndian.PutUint32(p.data, uint32(len(p.data))-20)
+			binary.BigEndian.PutUint32(p.data[26:], tag) // fix tag
+			_, err := c.conn.Write(p.data)
 			if err != nil {
-				p.responseChan <- packetResponse{
-					buff: nil,
-					err:  fmt.Errorf("couldn't send request: %s", err),
-				}
-			} else {
-				pending[tag] = p
+				p.response <- frame{err: fmt.Errorf("couldn't send request: %s", err)}
+				return fmt.Errorf("could not write to connection: %w", err)
 			}
-		case buff, ok := <-recv: // Incoming request
+			pending[tag] = p
+
+		case incoming, ok := <-in: // Incoming request
 			if !ok {
 				// Client was closed
-				break loop
+				logger.Info("incoming frames channel closed; aborting frame handler routine")
+				return nil
+			}
+			if incoming.err != nil {
+				// this is a circuit breaker
+				return fmt.Errorf("error reading incoming frame: %w", incoming.err)
 			}
 			var tag uint32
 			var rsp command
-			err = bread(buff, uint32Tag, &rsp, uint32Tag, &tag)
+			err := bread(incoming.buff, uint32Tag, &rsp, uint32Tag, &tag)
 			if err != nil {
-				// We've got a weird request from PulseAudio - that should never happen.
-				// We could ignore it and continue but it may hide some errors so let's panic.
-				panic(err)
+				// we've got a weird request from PulseAudio - that should never happen,
+				// we will reset the connection
+				return fmt.Errorf("received invalid pulseaudio request: %w", err)
 			}
 			if rsp == commandSubscribeEvent && tag == 0xffffffff {
 				select {
@@ -219,43 +317,45 @@ loop:
 			}
 			p, ok := pending[tag]
 			if !ok {
-				// Another case, similar to the one above.
-				// We could ignore it and continue but it may hide errors so let's panic.
-				panic(fmt.Sprintf("no pending requests for tag %d (%s)", tag, rsp))
+				return fmt.Errorf("no pending requests for tag %d (%s)", tag, rsp)
 			}
 			delete(pending, tag)
-			if rsp == commandError {
+			switch rsp {
+			case commandError:
 				var code uint32
-				bread(buff, uint32Tag, &code)
-				cmd := command(binary.BigEndian.Uint32(p.requestBytes[21:]))
-				p.responseChan <- packetResponse{
-					buff: nil,
-					err:  &Error{Cmd: cmd.String(), Code: code},
+				err = bread(incoming.buff, uint32Tag, &code)
+				if err != nil {
+					logger.Errorf("could not interpret error frame: %v", err)
 				}
+				cmd := command(binary.BigEndian.Uint32(p.data[21:]))
+				incoming.err = &Error{Cmd: cmd.String(), Code: code}
+				p.response <- incoming
 				continue
-			}
-			if rsp == commandReply {
-				p.responseChan <- packetResponse{
-					buff: buff,
-					err:  nil,
-				}
+			case commandReply:
+				p.response <- incoming
 				continue
+			default:
+				p.response <- frame{err: fmt.Errorf("expected reply (2) or error (0) but got: %s", rsp)}
 			}
-			p.responseChan <- packetResponse{
-				buff: nil,
-				err:  fmt.Errorf("expected Reply or Error but got: %s", rsp),
-			}
-		}
-	}
-	for _, p := range pending {
-		p.responseChan <- packetResponse{
-			buff: nil,
-			err:  fmt.Errorf("PulseAudio client was closed"),
 		}
 	}
 }
 
-func (c *Client) request(cmd command, args ...interface{}) (*bytes.Buffer, error) {
+func nextAvailableTag(tag uint32, pending map[uint32]request) uint32 {
+	// Find an unused tag
+	for {
+		_, exists := pending[tag]
+		if !exists {
+			return tag
+		}
+		tag++
+		if tag == 0xffffffff { // reserved for subscription events
+			tag = 0
+		}
+	}
+}
+
+func (c *Client) request(ctx context.Context, cmd command, args ...interface{}) (*bytes.Buffer, error) {
 	var b bytes.Buffer
 	args = append([]interface{}{uint32(0), // dummy length -- we'll overwrite at the end when we know our final length
 		uint32(0xffffffff),   // channel
@@ -271,31 +371,35 @@ func (c *Client) request(cmd command, args ...interface{}) (*bytes.Buffer, error
 	if b.Len() > frameSizeMaxAllow {
 		return nil, fmt.Errorf("request size %d is too long (only %d allowed)", b.Len(), frameSizeMaxAllow)
 	}
-	responseChan := make(chan packetResponse)
+	resp := make(chan frame)
 
-	err = c.addPacket(packet{
-		requestBytes: b.Bytes(),
-		responseChan: responseChan,
+	// TODO: add context based timeout
+	err = c.sendRequest(request{
+		data:     b.Bytes(),
+		response: resp,
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	response := <-responseChan
-	return response.buff, response.err
+	select {
+	case response := <-resp:
+		return response.buff, response.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
-func (c *Client) addPacket(data packet) (err error) {
-	defer func() {
-		if recover() != nil {
-			err = fmt.Errorf("connection closed")
-		}
-	}()
-	c.packets <- data
-	return nil
+func (c *Client) sendRequest(req request) error {
+	select {
+	case c.requests <- req:
+		return nil
+	default:
+		return ErrCouldNotSendRequest
+	}
 }
 
-func (c *Client) auth(cookiePath string) error {
+func (c *Client) auth(ctx context.Context, cookiePath string) error {
 	const protocolVersionMask = 0x0000FFFF
 	cookie, err := ioutil.ReadFile(cookiePath)
 	if err != nil {
@@ -303,10 +407,10 @@ func (c *Client) auth(cookiePath string) error {
 	}
 	const cookieLength = 256
 	if len(cookie) != cookieLength {
-		return fmt.Errorf("pulse audio client cookie has incorrect length %d: Expected %d (path %#v)",
+		return fmt.Errorf("pulseaudio client cookie has incorrect length %d: expected %d (path %#v)",
 			len(cookie), cookieLength, cookiePath)
 	}
-	b, err := c.request(commandAuth,
+	b, err := c.request(ctx, commandAuth,
 		uint32Tag, uint32(version),
 		arbitraryTag, uint32(len(cookie)), cookie)
 	if err != nil {
@@ -319,12 +423,12 @@ func (c *Client) auth(cookiePath string) error {
 	}
 	serverVersion &= protocolVersionMask
 	if serverVersion < version {
-		return fmt.Errorf("pulseAudio server supports version %d but minimum required is %d", serverVersion, version)
+		return fmt.Errorf("pulseaudio server supports version %d but minimum required is %d", serverVersion, version)
 	}
 	return nil
 }
 
-func (c *Client) setName() error {
+func (c *Client) setName(ctx context.Context) error {
 	props := map[string]string{
 		"application.name":           path.Base(os.Args[0]),
 		"application.process.id":     fmt.Sprintf("%d", os.Getpid()),
@@ -338,7 +442,7 @@ func (c *Client) setName() error {
 	if hostname, err := os.Hostname(); err == nil {
 		props["application.process.host"] = hostname
 	}
-	b, err := c.request(commandSetClientName, props)
+	b, err := c.request(ctx, commandSetClientName, props)
 	if err != nil {
 		return err
 	}
@@ -351,8 +455,11 @@ func (c *Client) setName() error {
 	return nil
 }
 
-// Close closes the connection to PulseAudio server and makes the Client unusable.
-func (c *Client) Close() error {
-	close(c.packets)
-	return c.conn.Close()
+func (c *Client) Close() {
+	close(c.requests)
+	close(c.updates)
+	// stop main connection loop (this also disconnects current connection)
+	if c.cancel != nil {
+		c.cancel()
+	}
 }

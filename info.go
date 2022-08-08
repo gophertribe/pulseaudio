@@ -1,6 +1,7 @@
 package pulseaudio
 
 import (
+	"context"
 	"io"
 )
 
@@ -250,8 +251,8 @@ func (p *Port) ReadFrom(r io.Reader) (int64, error) {
 	return 0, bread(r, int64Tag, &p.LatencyOffset)
 }
 
-func (c *Client) Sinks() ([]Sink, error) {
-	b, err := c.request(commandGetSinkInfoList)
+func (c *Client) Sinks(ctx context.Context) ([]Sink, error) {
+	b, err := c.request(ctx, commandGetSinkInfoList)
 	if err != nil {
 		return nil, err
 	}
@@ -267,8 +268,8 @@ func (c *Client) Sinks() ([]Sink, error) {
 	return sinks, nil
 }
 
-func (c *Client) Modules() ([]Module, error) {
-	b, err := c.request(commandGetModuleInfoList)
+func (c *Client) Modules(ctx context.Context) ([]Module, error) {
+	b, err := c.request(ctx, commandGetModuleInfoList)
 	if err != nil {
 		return nil, err
 	}
@@ -284,8 +285,8 @@ func (c *Client) Modules() ([]Module, error) {
 	return modules, nil
 }
 
-func (c *Client) Cards() ([]Card, error) {
-	b, err := c.request(commandGetCardInfoList)
+func (c *Client) Cards(ctx context.Context) ([]Card, error) {
+	b, err := c.request(ctx, commandGetCardInfoList)
 	if err != nil {
 		return nil, err
 	}
@@ -337,22 +338,22 @@ func (c *Client) Cards() ([]Card, error) {
 	return cards, nil
 }
 
-func (c *Client) SetCardProfile(cardIndex uint32, profileName string) error {
-	_, err := c.request(commandSetCardProfile,
+func (c *Client) SetCardProfile(ctx context.Context, cardIndex uint32, profileName string) error {
+	_, err := c.request(ctx, commandSetCardProfile,
 		uint32Tag, cardIndex,
 		stringNullTag,
 		stringTag, []byte(profileName), byte(0))
 	return err
 }
 
-func (c *Client) setDefaultSink(sinkName string) error {
-	_, err := c.request(commandSetDefaultSink,
+func (c *Client) setDefaultSink(ctx context.Context, sinkName string) error {
+	_, err := c.request(ctx, commandSetDefaultSink,
 		stringTag, []byte(sinkName), byte(0))
 	return err
 }
 
-func (c *Client) ServerInfo() (*Server, error) {
-	r, err := c.request(commandGetServerInfo)
+func (c *Client) ServerInfo(ctx context.Context) (*Server, error) {
+	r, err := c.request(ctx, commandGetServerInfo)
 	if err != nil {
 		return nil, err
 	}

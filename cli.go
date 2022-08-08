@@ -16,8 +16,20 @@ import (
 var ErrSinkNotFound = errs.New("sink not found in output")
 
 type Logger interface {
+	Info(msg string)
+	Infof(msg string, args ...interface{})
 	Errorf(msg string, args ...interface{})
 }
+
+type discardLogger struct{}
+
+func (d discardLogger) Info(_ string) {}
+
+func (d discardLogger) Infof(_ string, _ ...interface{}) {}
+
+func (d discardLogger) Errorf(_ string, _ ...interface{}) {}
+
+var _ Logger = discardLogger{}
 
 type CliClient struct {
 	defaultSink string

@@ -1,75 +1,81 @@
 package pulseaudio
 
 import (
+	"context"
 	"fmt"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"os"
+	"sync"
 	"testing"
 	"time"
 )
 
-// clientForTest creates a new client and ensures that there is an active output.
-func clientForTest() *Client {
-	c, err := NewClient()
-	if err != nil {
-		panic(err)
-	}
-	outs, active, err := c.Outputs()
-	if err != nil {
-		panic(err)
-	}
+func TestExample(t *testing.T) {
+	client, err := NewClient(WithLogger(stdoutLogger{}))
+	require.NoError(t, err)
+	var wg sync.WaitGroup
+	client.Connect(context.TODO(), 10*time.Second, &wg)
+	client.Close()
+	wg.Wait()
+	// Use `client` to interact with PulseAudio
+}
+
+func TestOutputs(t *testing.T) {
+	client, err := NewClient(WithLogger(stdoutLogger{}))
+	require.NoError(t, err)
+	var wg sync.WaitGroup
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	client.Connect(ctx, 5*time.Second, &wg)
+
+	outs, active, err := client.Outputs(ctx)
+	require.NoError(t, err)
 	if active < 0 {
 		for _, out := range outs {
 			if !out.Available {
 				continue
 			}
-			err = out.Activate()
-			if err != nil {
-				panic(err)
-			}
+			err = out.Activate(ctx)
+			assert.NoError(t, err)
 			break
 		}
 	}
-	err = c.SetVolume(0.5)
-	if err != nil {
-		panic(err)
-	}
-	return c
-}
-
-func Example() {
-	client, err := NewClient()
-	if err != nil {
-		panic(err)
-	}
-	defer client.Close()
-	// Use `client` to interact with PulseAudio
+	err = client.SetVolume(ctx, 0.5)
+	assert.NoError(t, err)
+	client.Close()
+	wg.Wait()
 }
 
 func TestExampleClient_SetVolume(t *testing.T) {
-	c := clientForTest()
-	defer c.Close()
+	c, err := NewClient(WithLogger(stdoutLogger{}))
+	require.NoError(t, err)
+	var wg sync.WaitGroup
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c.Connect(ctx, 5*time.Second, &wg)
 
-	err := c.SetVolume(1.5)
-	if err != nil {
-		panic(err)
-	}
+	err = c.SetVolume(ctx, 1.5)
+	assert.NoError(t, err)
 
-	vol, err := c.Volume()
-	if err != nil {
-		t.Errorf("%v", err)
-	}
-	if vol < 1.4999 {
-		t.Errorf("Wrong volume value : %v", vol)
-	}
+	vol, err := c.Volume(ctx)
+	assert.NoError(t, err)
+	assert.Equal(t, 1.4999, vol, "wrong volume value")
+
+	c.Close()
+	wg.Wait()
 }
 
 func TestExampleClient_Updates(t *testing.T) {
-	c := clientForTest()
-	defer c.Close()
+	c, err := NewClient(WithLogger(stdoutLogger{}))
+	require.NoError(t, err)
+	var wg sync.WaitGroup
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c.Connect(ctx, 5*time.Second, &wg)
 
-	updates, err := c.Updates()
-	if err != nil {
-		panic(err)
-	}
+	updates, err := c.Updates(ctx)
+	require.NoError(t, err)
 
 	select {
 	case _ = <-updates:
@@ -78,7 +84,7 @@ func TestExampleClient_Updates(t *testing.T) {
 		fmt.Println("No update in 10 ms")
 	}
 
-	err = c.SetVolume(0.1)
+	err = c.SetVolume(ctx, 0.1)
 	if err != nil {
 		panic(err)
 	}
@@ -95,46 +101,66 @@ func TestExampleClient_Updates(t *testing.T) {
 	// No update in 10 ms
 	// Volume set to 0.1
 	// Got update from PulseAudio
+	c.Close()
+	wg.Wait()
 }
 
 func TestExampleClient_SetMute(t *testing.T) {
-	c := clientForTest()
-	defer c.Close()
+	c, err := NewClient(WithLogger(stdoutLogger{}))
+	require.NoError(t, err)
+	var wg sync.WaitGroup
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c.Connect(ctx, 5*time.Second, &wg)
 
-	err := c.SetMute(true)
-	if err != nil {
-		t.Errorf("Can't mute : %v", err)
-	}
-	b, err := c.Mute()
-	if err != nil || !b {
-		t.Errorf("Can't mute : %v", err)
-	}
+	err = c.SetMute(ctx, true)
+	assert.NoError(t, err, "can't mute")
+	b, err := c.Mute(ctx)
+	assert.NoError(t, err, "can't mute")
+	assert.True(t, b)
 
-	err = c.SetMute(false)
-	if err != nil {
-		t.Errorf("Can't unmute : %v", err)
-	}
-	b, err = c.Mute()
-	if err != nil || b {
-		t.Errorf("Wrong value : %v", err)
-	}
+	err = c.SetMute(ctx, false)
+	assert.NoError(t, err, "can't unmute")
+	b, err = c.Mute(ctx)
+	assert.NoError(t, err, "can't mute")
+	assert.False(t, b, "wrong mute value")
+
+	c.Close()
+	wg.Wait()
 
 }
 
 func TestExampleClient_ToggleMute(t *testing.T) {
-	c := clientForTest()
-	defer c.Close()
+	c, err := NewClient(WithLogger(stdoutLogger{}))
+	require.NoError(t, err)
+	var wg sync.WaitGroup
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c.Connect(ctx, 30*time.Second, &wg)
 
-	b1, err := c.ToggleMute()
-	if err != nil {
-		t.Errorf("Can't toggle mute : %v", err)
-	}
-	b2, err := c.ToggleMute()
-	if err != nil {
-		t.Errorf("Can't toggle mute : %v", err)
-	}
+	fmt.Println("1")
+	b1, err := c.ToggleMute(ctx)
+	assert.NoError(t, err, "can't toggle mute")
+	b2, err := c.ToggleMute(ctx)
+	assert.NoError(t, err, "can't toggle mute")
 
-	if b1 == b2 {
-		t.Errorf("Wrong value : %v", err)
-	}
+	assert.NotEqual(t, b1, b2)
+
+	c.Close()
+	wg.Wait()
+}
+
+type stdoutLogger struct {
+}
+
+func (s stdoutLogger) Info(msg string) {
+	_, _ = fmt.Fprint(os.Stdout, "INF: "+msg+"\n")
+}
+
+func (s stdoutLogger) Infof(msg string, args ...interface{}) {
+	_, _ = fmt.Fprintf(os.Stdout, "INF: "+msg+"\n", args...)
+}
+
+func (s stdoutLogger) Errorf(msg string, args ...interface{}) {
+	_, _ = fmt.Fprintf(os.Stdout, "ERR: "+msg+"\n", args...)
 }

@@ -1,6 +1,9 @@
 package pulseaudio
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+)
 
 // Output represents PulseAudio output.
 type Output struct {
@@ -13,16 +16,16 @@ type Output struct {
 }
 
 // Activate sets this output as the main one.
-func (o Output) Activate() error {
+func (o Output) Activate(ctx context.Context) error {
 	c := o.client
-	cards, err := c.Cards()
+	cards, err := c.Cards(ctx)
 	if err != nil {
 		return err
 	}
 
 	if o.CardID == "all" && o.PortID == "none" {
 		for _, otherCard := range cards {
-			err = c.SetCardProfile(otherCard.Index, "off")
+			err = c.SetCardProfile(ctx, otherCard.Index, "off")
 			if err != nil {
 				return err
 			}
@@ -58,7 +61,7 @@ func (o Output) Activate() error {
 		if otherCard.Index == card.Index {
 			continue
 		}
-		err = c.SetCardProfile(otherCard.Index, "off")
+		err = c.SetCardProfile(ctx, otherCard.Index, "off")
 		if err != nil {
 			return err
 		}
@@ -69,15 +72,15 @@ func (o Output) Activate() error {
 			bestProfile = profile
 		}
 	}
-	err = c.SetCardProfile(card.Index, bestProfile.Name)
+	err = c.SetCardProfile(ctx, card.Index, bestProfile.Name)
 	if err != nil {
 		return err
 	}
-	sinks, err := c.Sinks()
+	sinks, err := c.Sinks(ctx)
 	if err != nil {
 		return err
 	}
-	s, err := c.ServerInfo()
+	s, err := c.ServerInfo(ctx)
 	if err != nil {
 		return err
 	}
@@ -88,7 +91,7 @@ func (o Output) Activate() error {
 		if s.DefaultSink == sink.Name {
 			continue
 		}
-		return c.setDefaultSink(sink.Name)
+		return c.setDefaultSink(ctx, sink.Name)
 	}
 	return nil
 }
@@ -96,16 +99,16 @@ func (o Output) Activate() error {
 // Outputs returns a list of all audio outputs and an index of the active audio output.
 //
 // The last audio output is always called "None" and indicates that audio is disabled.
-func (c *Client) Outputs() (outputs []Output, activeIndex int, err error) {
-	s, err := c.ServerInfo()
+func (c *Client) Outputs(ctx context.Context) (outputs []Output, activeIndex int, err error) {
+	s, err := c.ServerInfo(ctx)
 	if err != nil {
 		return nil, 0, err
 	}
-	sinks, err := c.Sinks()
+	sinks, err := c.Sinks(ctx)
 	if err != nil {
 		return nil, 0, err
 	}
-	cards, err := c.Cards()
+	cards, err := c.Cards(ctx)
 	if err != nil {
 		return nil, 0, err
 	}

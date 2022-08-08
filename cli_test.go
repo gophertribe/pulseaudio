@@ -125,6 +125,14 @@ Sink #2
 type logger struct {
 }
 
+func (l logger) Info(msg string) {
+	fmt.Printf("INF: %s\n", msg)
+}
+
+func (l logger) Infof(msg string, args ...interface{}) {
+	fmt.Printf("INF: "+msg+"\n", args)
+}
+
 func (l logger) Errorf(msg string, args ...interface{}) {
-	fmt.Printf(msg+"\n", args)
+	fmt.Printf("ERR: "+msg+"\n", args)
 }
