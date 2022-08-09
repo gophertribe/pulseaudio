@@ -36,6 +36,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/imdario/mergo"
 )
 
 const version = 32
@@ -69,24 +71,9 @@ func (err *Error) Error() string {
 // ClientOpt defines a client modifier routine
 type ClientOpt func(*Client)
 
-// WithAddr sets address manually
-func WithAddr(proto, addr string) ClientOpt {
-	return func(client *Client) {
-		client.protocol = proto
-		client.addr = addr
-	}
-}
-
 func WithDialTimeout(timeout time.Duration) ClientOpt {
 	return func(client *Client) {
 		client.dialer.Timeout = timeout
-	}
-}
-
-// WithLogger sets logger on the client
-func WithLogger(logger Logger) ClientOpt {
-	return func(client *Client) {
-		client.logger = logger
 	}
 }
 
@@ -97,40 +84,53 @@ type Client struct {
 	clientIndex int
 	requests    chan request
 	updates     chan struct{}
-	protocol    string
-	addr        string
-	cookie      string
 	dialer      net.Dialer
 	logger      Logger
 	cancel      context.CancelFunc
+	opts        Opts
+}
+
+// Opts wraps all available config options
+type Opts struct {
+	DialTimeout    time.Duration
+	RequestTimeout time.Duration
+	Logger         Logger
+	Protocol       string
+	Addr           string
+	Cookie         string
 }
 
 // NewClient establishes a connection to the PulseAudio server.
-func NewClient(opts ...ClientOpt) (*Client, error) {
+func NewClient(opts Opts) *Client {
+	defaults := Opts{
+		Addr:     os.Getenv("PULSE_SERVER"),
+		Protocol: "tcp",
+		Cookie:   os.Getenv("PULSE_COOKIE"),
+	}
+	_ = mergo.Merge(opts, defaults)
+
 	c := &Client{
 		requests: make(chan request, 16),
 		updates:  make(chan struct{}, 1),
-		protocol: "tcp",
-		addr:     os.Getenv("PULSE_SERVER"),
-		cookie:   os.Getenv("PULSE_COOKIE"),
+		opts:     opts,
 	}
-	for _, o := range opts {
-		o(c)
+	if c.opts.Addr == "" {
+		c.opts.Addr = defaultAddr
 	}
-	if c.addr == "" {
-		c.addr = defaultAddr
+	if strings.HasPrefix(c.opts.Addr, "unix://") {
+		c.opts.Addr = strings.TrimPrefix(c.opts.Addr, "unix://")
+		c.opts.Protocol = "unix"
 	}
-	if strings.HasPrefix(c.addr, "unix://") {
-		c.addr = strings.TrimPrefix(c.addr, "unix://")
-		c.protocol = "unix"
+	if c.opts.Cookie == "" {
+		c.opts.Cookie = os.Getenv("HOME") + "/.config/pulse/cookie"
 	}
-	if c.cookie == "" {
-		c.cookie = os.Getenv("HOME") + "/.config/pulse/cookie"
-	}
+	c.dialer.Timeout = c.opts.DialTimeout
+	c.logger = c.opts.Logger
+
 	if c.logger == nil {
 		c.logger = discardLogger{}
 	}
-	return c, nil
+	return c
 }
 
 func (c *Client) Connect(ctx context.Context, interval time.Duration, wg *sync.WaitGroup) {
@@ -165,7 +165,7 @@ func (c *Client) Connect(ctx context.Context, interval time.Duration, wg *sync.W
 }
 
 func (c *Client) init(ctx context.Context) error {
-	err := c.auth(ctx, c.cookie)
+	err := c.auth(ctx, c.opts.Cookie)
 	if err != nil {
 		return fmt.Errorf("authentication failure: %w", err)
 	}
@@ -178,11 +178,11 @@ func (c *Client) init(ctx context.Context) error {
 }
 
 func (c *Client) connect(ctx context.Context, logger Logger, wg *sync.WaitGroup) error {
-	logger.Infof("dialing pulseaudio server %s://%s", c.protocol, c.addr)
+	logger.Infof("dialing pulseaudio server %s://%s", c.opts.Protocol, c.opts.Addr)
 	var err error
-	c.conn, err = c.dialer.DialContext(ctx, c.protocol, c.addr)
+	c.conn, err = c.dialer.DialContext(ctx, c.opts.Protocol, c.opts.Addr)
 	if err != nil {
-		return fmt.Errorf("could not dial pulseaudio server %s: %w", c.addr, err)
+		return fmt.Errorf("could not dial pulseaudio server %s: %w", c.opts.Addr, err)
 	}
 	defer func() { _ = c.conn.Close() }()
 
@@ -373,8 +373,12 @@ func (c *Client) request(ctx context.Context, cmd command, args ...interface{}) 
 	}
 	resp := make(chan frame)
 
-	// TODO: add context based timeout
-	err = c.sendRequest(request{
+	if c.opts.RequestTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.opts.RequestTimeout)
+		defer cancel()
+	}
+	err = c.sendRequest(ctx, request{
 		data:     b.Bytes(),
 		response: resp,
 	})
@@ -390,10 +394,12 @@ func (c *Client) request(ctx context.Context, cmd command, args ...interface{}) 
 	}
 }
 
-func (c *Client) sendRequest(req request) error {
+func (c *Client) sendRequest(ctx context.Context, req request) error {
 	select {
 	case c.requests <- req:
 		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	default:
 		return ErrCouldNotSendRequest
 	}

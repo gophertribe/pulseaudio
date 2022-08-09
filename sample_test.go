@@ -12,8 +12,7 @@ import (
 )
 
 func TestExample(t *testing.T) {
-	client, err := NewClient(WithLogger(stdoutLogger{}))
-	require.NoError(t, err)
+	client := NewClient(Opts{Logger: stdoutLogger{}})
 	var wg sync.WaitGroup
 	client.Connect(context.TODO(), 10*time.Second, &wg)
 	client.Close()
@@ -22,8 +21,7 @@ func TestExample(t *testing.T) {
 }
 
 func TestOutputs(t *testing.T) {
-	client, err := NewClient(WithLogger(stdoutLogger{}))
-	require.NoError(t, err)
+	client := NewClient(Opts{Logger: stdoutLogger{}})
 	var wg sync.WaitGroup
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -48,14 +46,13 @@ func TestOutputs(t *testing.T) {
 }
 
 func TestExampleClient_SetVolume(t *testing.T) {
-	c, err := NewClient(WithLogger(stdoutLogger{}))
-	require.NoError(t, err)
+	c := NewClient(Opts{Logger: stdoutLogger{}})
 	var wg sync.WaitGroup
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	c.Connect(ctx, 5*time.Second, &wg)
 
-	err = c.SetVolume(ctx, 1.5)
+	err := c.SetVolume(ctx, 1.5)
 	assert.NoError(t, err)
 
 	vol, err := c.Volume(ctx)
@@ -67,8 +64,7 @@ func TestExampleClient_SetVolume(t *testing.T) {
 }
 
 func TestExampleClient_Updates(t *testing.T) {
-	c, err := NewClient(WithLogger(stdoutLogger{}))
-	require.NoError(t, err)
+	c := NewClient(Opts{Logger: stdoutLogger{}})
 	var wg sync.WaitGroup
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -106,14 +102,13 @@ func TestExampleClient_Updates(t *testing.T) {
 }
 
 func TestExampleClient_SetMute(t *testing.T) {
-	c, err := NewClient(WithLogger(stdoutLogger{}))
-	require.NoError(t, err)
+	c := NewClient(Opts{Logger: stdoutLogger{}})
 	var wg sync.WaitGroup
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	c.Connect(ctx, 5*time.Second, &wg)
 
-	err = c.SetMute(ctx, true)
+	err := c.SetMute(ctx, true)
 	assert.NoError(t, err, "can't mute")
 	b, err := c.Mute(ctx)
 	assert.NoError(t, err, "can't mute")
@@ -131,8 +126,7 @@ func TestExampleClient_SetMute(t *testing.T) {
 }
 
 func TestExampleClient_ToggleMute(t *testing.T) {
-	c, err := NewClient(WithLogger(stdoutLogger{}))
-	require.NoError(t, err)
+	c := NewClient(Opts{Logger: stdoutLogger{}})
 	var wg sync.WaitGroup
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
