@@ -33,16 +33,14 @@ import (
 	"os"
 	"os/user"
 	"path"
-	"strings"
+	"regexp"
 	"sync"
 	"time"
-
-	"github.com/imdario/mergo"
 )
 
 const version = 32
 
-var defaultAddr = fmt.Sprintf("/run/user/%d/pulse/native", os.Getuid())
+var defaultAddr = fmt.Sprintf("unix:///run/user/%d/pulse/native", os.Getuid())
 
 type frame struct {
 	buff *bytes.Buffer
@@ -100,15 +98,10 @@ type Opts struct {
 	Cookie         string
 }
 
+var addrRegex = regexp.MustCompile(`^([a-z]+)://(.*)`)
+
 // NewClient establishes a connection to the PulseAudio server.
 func NewClient(opts Opts) *Client {
-	defaults := Opts{
-		Addr:     os.Getenv("PULSE_SERVER"),
-		Protocol: "tcp",
-		Cookie:   os.Getenv("PULSE_COOKIE"),
-	}
-	_ = mergo.Merge(opts, defaults)
-
 	c := &Client{
 		requests: make(chan request, 16),
 		updates:  make(chan struct{}, 1),
@@ -117,12 +110,19 @@ func NewClient(opts Opts) *Client {
 	if c.opts.Addr == "" {
 		c.opts.Addr = defaultAddr
 	}
-	if strings.HasPrefix(c.opts.Addr, "unix://") {
-		c.opts.Addr = strings.TrimPrefix(c.opts.Addr, "unix://")
+
+	matches := addrRegex.FindStringSubmatch(c.opts.Addr)
+	if len(matches) != 3 {
+		// unix socket is the default
 		c.opts.Protocol = "unix"
+	} else {
+		c.opts.Protocol = matches[1]
+		c.opts.Addr = matches[2]
 	}
 	if c.opts.Cookie == "" {
-		c.opts.Cookie = os.Getenv("HOME") + "/.config/pulse/cookie"
+		// try homedir
+		home, _ := os.UserHomeDir()
+		c.opts.Cookie = home + "/.config/pulse/cookie"
 	}
 	c.dialer.Timeout = c.opts.DialTimeout
 	c.logger = c.opts.Logger
