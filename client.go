@@ -54,6 +54,7 @@ type request struct {
 
 var (
 	ErrClientClosed        = errors.New("pulseaudio client was closed")
+	ErrClientDisabled      = errors.New("client disabled")
 	ErrCouldNotSendRequest = errors.New("could not send packet")
 )
 

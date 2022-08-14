@@ -9,6 +9,9 @@ const pulseVolumeMax = 0xffff
 
 // Volume returns current audio volume as a number from 0 to 1 (or more than 1 - if volume is boosted).
 func (c *Client) Volume(ctx context.Context) (float32, error) {
+	if c == nil {
+		return 0.0, ErrClientDisabled
+	}
 	s, err := c.ServerInfo(ctx)
 	if err != nil {
 		return 0, err
@@ -25,6 +28,9 @@ func (c *Client) Volume(ctx context.Context) (float32, error) {
 
 // SetVolume changes the current volume to a specified value from 0 to 1 (or more than 1 - if volume should be boosted).
 func (c *Client) SetVolume(ctx context.Context, volume float32) error {
+	if c == nil {
+		return ErrClientDisabled
+	}
 	s, err := c.ServerInfo(ctx)
 	if err != nil {
 		return err
@@ -33,6 +39,9 @@ func (c *Client) SetVolume(ctx context.Context, volume float32) error {
 }
 
 func (c *Client) SetSinkVolume(ctx context.Context, sinkName string, volume float32) error {
+	if c == nil {
+		return ErrClientDisabled
+	}
 	return c.setSinkVolume(ctx, sinkName, CVolume{uint32(volume * 0xffff)})
 }
 
@@ -44,6 +53,9 @@ func (c *Client) setSinkVolume(ctx context.Context, sinkName string, cvolume CVo
 
 // ToggleMute reverse mute status
 func (c *Client) ToggleMute(ctx context.Context) (bool, error) {
+	if c == nil {
+		return false, ErrClientDisabled
+	}
 	s, err := c.ServerInfo(ctx)
 	if err != nil || s == nil {
 		return true, err
@@ -60,6 +72,9 @@ func (c *Client) ToggleMute(ctx context.Context) (bool, error) {
 
 // SetMute reverse mute status
 func (c *Client) SetMute(ctx context.Context, mute bool) error {
+	if c == nil {
+		return ErrClientDisabled
+	}
 	s, err := c.ServerInfo(ctx)
 	if err != nil || s == nil {
 		return err
@@ -69,6 +84,9 @@ func (c *Client) SetMute(ctx context.Context, mute bool) error {
 
 // SetSinkMute reverse mute status
 func (c *Client) SetSinkMute(ctx context.Context, sinkName string, mute bool) error {
+	if c == nil {
+		return ErrClientDisabled
+	}
 	muteCmd := '0'
 	if mute {
 		muteCmd = '1'
@@ -78,6 +96,9 @@ func (c *Client) SetSinkMute(ctx context.Context, sinkName string, mute bool) er
 }
 
 func (c *Client) Mute(ctx context.Context) (bool, error) {
+	if c == nil {
+		return false, ErrClientDisabled
+	}
 	s, err := c.ServerInfo(ctx)
 	if err != nil || s == nil {
 		return false, err
