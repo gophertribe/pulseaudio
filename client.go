@@ -357,6 +357,9 @@ func nextAvailableTag(tag uint32, pending map[uint32]request) uint32 {
 }
 
 func (c *Client) request(ctx context.Context, cmd command, args ...interface{}) (*bytes.Buffer, error) {
+	if c == nil {
+		return nil, ErrClientDisabled
+	}
 	var b bytes.Buffer
 	args = append([]interface{}{uint32(0), // dummy length -- we'll overwrite at the end when we know our final length
 		uint32(0xffffffff),   // channel
